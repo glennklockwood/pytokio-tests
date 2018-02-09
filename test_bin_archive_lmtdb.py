@@ -3,6 +3,7 @@
 import os
 import sys
 import subprocess
+import warnings
 import nose
 import h5py
 import numpy
@@ -27,6 +28,7 @@ def test_bin_archive_lmtdb():
     Generate a new HDF5 file from a full day's worth of LMT data stored in
     SQLite and compare it to the reference file to ensure correctness
     """
+    warnings.simplefilter("always")
 
     tokiotest.TEMP_FILE.close()
 
@@ -60,18 +62,36 @@ def test_bin_archive_lmtdb():
     checked_ct = 0
     generated = h5py.File(output_file, 'r')
     for group_name, group_data in generated.iteritems():
+        if group_name not in reference:
+            errmsg = "Cannot compare group %s (does not exist in reference)" % group_name
+            warnings.warn(errmsg)
+            continue
         for dataset_name, dataset in group_data.iteritems():
             if isinstance(dataset, h5py.Dataset):
                 print "Comparing", dataset_name
                 checked_ct += 1
-                assert dataset_name in reference[group_name].keys()
+                if dataset_name not in reference[group_name]:
+                    errmsg = "Cannot compare dataset %s (does not exist in reference)" % dataset_name
+                    warnings.warn(errmsg)
+                    continue
+                assert dataset_name in reference[group_name]
 
                 shape = reference[group_name][dataset_name].shape
                 assert shape == dataset.shape
 
                 if len(shape) == 1:
                     assert (numpy.isclose(dataset[:], reference[group_name][dataset_name][:])).all()
+                    sum1 = dataset[:].sum() 
+                    sum2 = reference[group_name][dataset_name][:].sum()
+                    print "%f == %f? %s" % (sum1, sum2, numpy.isclose(sum1, sum2))
+                    assert numpy.isclose(sum1, sum2)
+                    assert sum1 > 0
                 elif len(shape) == 2:
                     assert (numpy.isclose(dataset[:, :], reference[group_name][dataset_name][:, :])).all()
+                    sum1 = dataset[:].sum().sum()
+                    sum2 = reference[group_name][dataset_name][:].sum().sum()
+                    print "%f == %f? %s" % (sum1, sum2, numpy.isclose(sum1, sum2))
+                    assert numpy.isclose(sum1, sum2)
+                    assert sum1 > 0
 
     assert checked_ct > 0
