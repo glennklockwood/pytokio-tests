@@ -15,10 +15,17 @@ sys.path.append(os.path.join(PYTOKIO_HOME, 'tokio'))
 import tokio
 import tokiotest
 
-LMTDB_SQLITE_REF = "snx11025_2018-01-30.sqlite3"
-LMTDB_HDF5_REF = "snx11025_2018-01-30.hdf5"
-LMTDB_START = "2018-01-30T00:00:00"
-LMTDB_END = "2018-01-31T00:00:00"
+LMTDB_SQLITE_REF = "snx11025_2018-02-09T12:00:00.sqlite3"
+LMTDB_HDF5_REF = "snx11025_2018-02-09T12:00:00.hdf5"
+LMTDB_START = "2018-02-09T00:00:00"
+LMTDB_END = "2018-02-09T12:00:00"
+
+H5LMT_REF = "snx11025_2018-02-09T12:00:00.h5lmt"
+# the contents of the sqlite3 file only contains enough data to populate this
+# many timesteps' rows; if you try to compare a generated file to H5LMT_REF
+# beyond this index, you will be comparing -0.0 (generated) to real values
+# (H5LMT_REF)
+H5LMT_MAX_INDEX = 8640
 
 ARCHIVE_LMTDB_BIN = os.path.join(PYTOKIO_HOME, 'bin', 'archive_lmtdb.py')
 
@@ -52,13 +59,90 @@ def test_bin_archive_lmtdb():
     subprocess.check_output(cmd)
     print "Created", output_file
 
-    # We're relying on the specific two-level hierarchy of the TOKIO HDF5 format
     generated = h5py.File(output_file, 'r')
-    reference = h5py.File(LMTDB_HDF5_REF, 'r')
 
+    reference = tokio.connectors.hdf5.Hdf5(H5LMT_REF, 'r')
+    compare_h5lmt(generated=generated, reference=reference)
+
+    reference = h5py.File(LMTDB_HDF5_REF, 'r')
     compare_tts(generated, reference)
 
+def compare_h5lmt(generated, reference, tol_pct=0.005):
+    """Compare a TOKIO HDF5 file to a pylmt H5LMT file
+
+    Args:
+        generated (h5py.File): newly generated HDF5 file
+        reference (tokio.connectors.hdf5.Hdf5): reference H5LMT file
+        tol_pct (float): percent deviation between generated and reference that
+            is still considered equal (expressed as a fraction < 1.0)
+    """
+    dataset_names = []
+    for group_name, group_data in generated.iteritems():
+        for dataset_name, dataset in group_data.iteritems():
+            if isinstance(dataset, h5py.Dataset):
+                dataset_names.append("/%s/%s" % (group_name, dataset_name))
+
+    checked_ct = 0
+    for dataset_name in dataset_names:
+        print "Comparing %s from %s" % (dataset_name, reference.filename)
+        ref_dataset = reference.get(dataset_name)
+        if ref_dataset is None:
+            errmsg = "Cannot compare dataset %s (not in reference)" % dataset_name
+            warnings.warn(errmsg)
+            continue
+
+        gen_dataset = generated.get(dataset_name)
+        gen_shape = gen_dataset.shape
+
+        if len(gen_shape) == 1:
+            sum1 = gen_dataset[:].sum()
+            sum2 = ref_dataset[:-1].sum()
+            print "%f == %f? %s" % (sum1, sum2, numpy.isclose(sum1, sum2))
+            assert numpy.isclose(sum1[:], sum2[:])
+            assert sum1 > 0
+            assert (numpy.isclose(gen_dataset[:], ref_dataset[:-1])).all()
+
+        elif len(gen_shape) == 2:
+            # H5LMT is semantically inconsistent across its own datasets!
+            if 'OSTBulk' in ref_dataset.name:
+                ref_slice = (slice(1, H5LMT_MAX_INDEX + 1), slice(None, None))
+                fudged = True
+            else:
+                ref_slice = (slice(None, H5LMT_MAX_INDEX), slice(None, None))
+                fudged = False
+
+            match_matrix = numpy.isclose(gen_dataset[:H5LMT_MAX_INDEX, :], ref_dataset[ref_slice])
+            nmatch = match_matrix.sum()
+            nelements = match_matrix.shape[0] * match_matrix.shape[1]
+
+            sum1 = gen_dataset[:H5LMT_MAX_INDEX, :].sum()
+            sum2 = ref_dataset[ref_slice].sum()
+
+            if fudged:
+                pct_diff = abs(sum1 - sum2) / sum2
+                print "%e < %e? %s" % (pct_diff, tol_pct, pct_diff < tol_pct)
+                assert pct_diff < tol_pct
+
+                pct_diff = (1.0 - float(nmatch) / float(nelements))
+                assert pct_diff < tol_pct
+            else:
+                print "%f == %f? %s" % (sum1, sum2, numpy.isclose(sum1, sum2))
+                assert numpy.isclose(sum1, sum2)
+                assert nmatch == nelements
+
+            assert sum1 > 0
+        checked_ct += 1
+
+    print "Verified %d datasets against reference" % checked_ct
+    assert checked_ct > 0
+
 def compare_tts(generated, reference):
+    """Compare two TOKIO HDF5 files
+
+    Args:
+        generated (h5py.File): newly generated HDF5 file
+        reference (h5py.File): reference HDF5 file
+    """
     checked_ct = 0
     for group_name, group_data in generated.iteritems():
         if group_name not in reference:
@@ -66,7 +150,6 @@ def compare_tts(generated, reference):
             warnings.warn(errmsg)
             continue
         ref_group = reference[group_name]
-        print ref_group
         for dataset_name, dataset in group_data.iteritems():
             if not isinstance(dataset, h5py.Dataset):
                 continue
